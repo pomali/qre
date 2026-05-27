@@ -27,6 +27,17 @@
   flex-wrap: wrap;
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}
+
 button {
   border: 0;
   background: #2f68ff;
@@ -185,6 +196,47 @@ video {
 
 .encoding-note {
   color: #9aa7bf;
+}
+
+.viewer-controls {
+  display: grid;
+  gap: 0.6rem;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.parameter-list {
+  margin: 0.8rem 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+
+.parameter-list div {
+  background: #111724;
+  border-radius: 0.5rem;
+  padding: 0.45rem 0.55rem;
+}
+
+.parameter-list dt {
+  font-size: 0.78rem;
+  color: #9aa7bf;
+}
+
+.parameter-list dd {
+  margin: 0.15rem 0 0;
+  word-break: break-word;
+}
+
+.decoded-output {
+  margin: 0.8rem 0;
+  padding: 0.75rem;
+  border-radius: 0.55rem;
+  background: #0f1118;
+  border: 1px solid #38435e;
+  color: #fff;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .toast {
