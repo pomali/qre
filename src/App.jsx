@@ -120,9 +120,6 @@ const toNumeric = (bytes) => {
 }
 const toAlphanumeric = (value) => {
   const upper = value.toUpperCase()
-  if (QR_ALPHANUMERIC_SET.test(upper)) {
-    return upper
-  }
   return Array.from(upper, (char) => (QR_ALPHANUMERIC_SET.test(char) ? char : '·')).join('')
 }
 
