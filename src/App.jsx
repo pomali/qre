@@ -16,6 +16,7 @@ const SUPPORTED_FORMATS = [
   'codabar',
   'pdf417',
 ]
+const LOW_LIGHT_HINT_DELAY_MS = 10000
 
 const LABELS = {
   qr_code: 'QR Code',
@@ -53,6 +54,10 @@ const isValidUrl = (value) => {
 }
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
+const createEntryId = () =>
+  (typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`)
 
 function App() {
   const videoRef = useRef(null)
@@ -162,7 +167,7 @@ function App() {
           }
 
           const entry = {
-            id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+            id: createEntryId(),
             value: code.rawValue,
             format: code.format || 'unknown',
             detectedAt: Date.now(),
@@ -240,7 +245,7 @@ function App() {
           if (!hasSuccessfulScanRef.current) {
             setShowTorchHint(true)
           }
-        }, 10000)
+        }, LOW_LIGHT_HINT_DELAY_MS)
       }
 
       rafRef.current = requestAnimationFrame(() => {
