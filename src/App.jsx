@@ -45,9 +45,19 @@ const ENCODING_OPTIONS = [
   { value: 'shift_jis', label: 'Shift_JIS' },
   { value: 'gb18030', label: 'GB18030' },
 ]
+const INTERPRETATION_OPTIONS = [
+  { value: 'text', label: 'Text' },
+  { value: 'numeric', label: 'Numeric' },
+  { value: 'alphanumeric', label: 'Alphanumeric' },
+  { value: 'binary', label: 'Binary / Hex' },
+]
+const QR_ALPHANUMERIC_SET = /^[0-9A-Z $%*+\-./:]*$/
 
 const formatLabel = (format = 'unknown') => LABELS[format] || format
+const formatSourceLabel = (source) => (source === 'gallery' ? 'Image/Gallery' : 'Camera')
 const getFormatEncoding = (encodingByFormat, format) => encodingByFormat[format] || 'utf-8'
+const getFormatInterpretation = (interpretationByFormat, format) =>
+  interpretationByFormat[format] || 'text'
 
 const decodeWithEncoding = (value, encoding) => {
   if (!value || encoding === 'utf-8') {
@@ -83,6 +93,39 @@ const isValidUrl = (value) => {
 }
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
+const getBytesFromText = (value) => {
+  if (!value) {
+    return { bytes: new Uint8Array(), source: 'Empty value' }
+  }
+  const codeUnits = Array.from(value, (char) => char.charCodeAt(0))
+  if (codeUnits.every((unit) => unit <= 0xff)) {
+    return {
+      bytes: Uint8Array.from(codeUnits),
+      source: 'Code point bytes from decoded text',
+    }
+  }
+  return {
+    bytes: new TextEncoder().encode(value),
+    source: 'UTF-8 bytes from decoded text',
+  }
+}
+const toHex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join(' ')
+const toBinary = (bytes) => Array.from(bytes, (byte) => byte.toString(2).padStart(8, '0')).join(' ')
+const toNumeric = (bytes) => {
+  if (bytes.length === 0) {
+    return '0'
+  }
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  return BigInt(`0x${hex}`).toString(10)
+}
+const toAlphanumeric = (value) => {
+  const upper = value.toUpperCase()
+  if (QR_ALPHANUMERIC_SET.test(upper)) {
+    return upper
+  }
+  return Array.from(upper, (char) => (QR_ALPHANUMERIC_SET.test(char) ? char : '·')).join('')
+}
+
 const createEntryId = () =>
   (typeof crypto !== 'undefined' && crypto.randomUUID
     ? crypto.randomUUID()
@@ -90,6 +133,7 @@ const createEntryId = () =>
 
 function App() {
   const videoRef = useRef(null)
+  const fileInputRef = useRef(null)
   const streamRef = useRef(null)
   const trackRef = useRef(null)
   const detectorRef = useRef(null)
@@ -121,6 +165,8 @@ function App() {
   const [showTorchHint, setShowTorchHint] = useState(false)
   const [focusMessage, setFocusMessage] = useState('')
   const [encodingByFormat, setEncodingByFormat] = useState({})
+  const [interpretationByFormat, setInterpretationByFormat] = useState({})
+  const [scanningImage, setScanningImage] = useState(false)
 
   const canUseScanner = typeof window !== 'undefined' && 'BarcodeDetector' in window
 
@@ -173,6 +219,63 @@ function App() {
       }
     } catch {
       // Ignore playback errors and continue scanning.
+    }
+  }, [])
+
+  const addDetectedCode = useCallback(
+    (code, readDetails) => {
+      if (!code.rawValue || seenValuesRef.current.has(code.rawValue)) {
+        return null
+      }
+
+      const entry = {
+        id: createEntryId(),
+        value: code.rawValue,
+        format: code.format || 'unknown',
+        detectedAt: Date.now(),
+        source: readDetails.source,
+        readMode: readDetails.readMode,
+        fileName: readDetails.fileName || '',
+      }
+      seenValuesRef.current.add(entry.value)
+      hasSuccessfulScanRef.current = true
+      setShowTorchHint(false)
+      setCodes((current) => [entry, ...current])
+      setSelectedCode(entry)
+      triggerFeedback()
+      return entry
+    },
+    [triggerFeedback],
+  )
+
+  const detectInvertedImageCodes = useCallback(async (bitmap, detector) => {
+    const width = bitmap.width || bitmap.videoWidth
+    const height = bitmap.height || bitmap.videoHeight
+    if (!width || !height) {
+      return []
+    }
+
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const context = canvas.getContext('2d', { willReadFrequently: true })
+    if (!context) {
+      return []
+    }
+    context.drawImage(bitmap, 0, 0, width, height)
+    const frame = context.getImageData(0, 0, width, height)
+    const { data } = frame
+    for (let index = 0; index < data.length; index += 4) {
+      data[index] = 255 - data[index]
+      data[index + 1] = 255 - data[index + 1]
+      data[index + 2] = 255 - data[index + 2]
+    }
+    context.putImageData(frame, 0, 0)
+
+    try {
+      return await detector.detect(canvas)
+    } catch {
+      return []
     }
   }, [])
 
@@ -246,6 +349,7 @@ function App() {
 
       scanningRef.current = true
       try {
+        let readMode = 'normal'
         let detected = await detectorRef.current.detect(videoRef.current)
         if (detected.length === 0) {
           emptyDetectionsRef.current += 1
@@ -257,6 +361,7 @@ function App() {
             if (detected.length > 0) {
               emptyDetectionsRef.current = 0
               invertedCooldownUntilRef.current = 0
+              readMode = 'inverted'
             } else {
               invertedCooldownUntilRef.current = Date.now() + INVERTED_DETECTION_COOLDOWN_MS
             }
@@ -266,23 +371,9 @@ function App() {
           invertedCooldownUntilRef.current = 0
         }
         for (const code of detected) {
-          if (!code.rawValue || seenValuesRef.current.has(code.rawValue)) {
-            continue
+          if (addDetectedCode(code, { source: 'camera', readMode })) {
+            break
           }
-
-          const entry = {
-            id: createEntryId(),
-            value: code.rawValue,
-            format: code.format || 'unknown',
-            detectedAt: Date.now(),
-          }
-          seenValuesRef.current.add(entry.value)
-          hasSuccessfulScanRef.current = true
-          setShowTorchHint(false)
-          setCodes((current) => [entry, ...current])
-          setSelectedCode(entry)
-          triggerFeedback()
-          break
         }
       } catch {
         setError('Scanning failed on this device.')
@@ -293,7 +384,7 @@ function App() {
         })
       }
     }
-  }, [detectInvertedCodes, triggerFeedback])
+  }, [addDetectedCode, detectInvertedCodes])
 
   const startScanner = useCallback(async () => {
     if (!canUseScanner) {
@@ -366,6 +457,61 @@ function App() {
       }
     }
   }, [canUseScanner, stopScanner])
+
+  const scanFromImage = useCallback(
+    async (file) => {
+      if (!file) {
+        return
+      }
+      if (!canUseScanner) {
+        setError('Barcode scanning is not supported by this browser.')
+        return
+      }
+
+      setError('')
+      setScanningImage(true)
+      try {
+        const detector =
+          detectorRef.current || new window.BarcodeDetector({ formats: SUPPORTED_FORMATS })
+        detectorRef.current = detector
+        const bitmap = await createImageBitmap(file)
+        let readMode = 'normal'
+        let detected = await detector.detect(bitmap)
+        if (detected.length === 0) {
+          detected = await detectInvertedImageCodes(bitmap, detector)
+          if (detected.length > 0) {
+            readMode = 'inverted'
+          }
+        }
+
+        bitmap.close?.()
+
+        let added = 0
+        for (const code of detected) {
+          if (
+            addDetectedCode(code, {
+              source: 'gallery',
+              readMode,
+              fileName: file.name,
+            })
+          ) {
+            added += 1
+          }
+        }
+
+        if (added === 0) {
+          setError('No new code was found in the selected image.')
+          return
+        }
+        showToast(added > 1 ? `Added ${added} codes from image.` : 'Added code from image.')
+      } catch {
+        setError('Unable to decode the selected image.')
+      } finally {
+        setScanningImage(false)
+      }
+    },
+    [addDetectedCode, canUseScanner, detectInvertedImageCodes, showToast],
+  )
 
   useEffect(() => {
     const bootstrap = setTimeout(() => {
@@ -468,11 +614,52 @@ function App() {
     (code) => decodeWithEncoding(code.value, getFormatEncoding(encodingByFormat, code.format)),
     [encodingByFormat],
   )
+  const getCodeInterpretation = useCallback(
+    (code) => {
+      const encoding = getFormatEncoding(encodingByFormat, code.format)
+      const interpretation = getFormatInterpretation(interpretationByFormat, code.format)
+      const decodedText = decodeWithEncoding(code.value, encoding)
+      const { bytes, source: byteSource } = getBytesFromText(decodedText)
+      if (interpretation === 'numeric') {
+        return {
+          value: toNumeric(bytes),
+          encoding,
+          interpretation,
+          byteSource,
+          byteLength: bytes.length,
+        }
+      }
+      if (interpretation === 'alphanumeric') {
+        return {
+          value: toAlphanumeric(decodedText),
+          encoding,
+          interpretation,
+          byteSource,
+          byteLength: bytes.length,
+        }
+      }
+      if (interpretation === 'binary') {
+        return {
+          value: `HEX: ${toHex(bytes) || '(empty)'}\nBIN: ${toBinary(bytes) || '(empty)'}`,
+          encoding,
+          interpretation,
+          byteSource,
+          byteLength: bytes.length,
+        }
+      }
+      return {
+        value: decodedText,
+        encoding,
+        interpretation,
+        byteSource,
+        byteLength: bytes.length,
+      }
+    },
+    [encodingByFormat, interpretationByFormat],
+  )
 
   const selectedCodeText = selectedCode ? getCodeText(selectedCode) : ''
-  const selectedCodeEncoding = selectedCode
-    ? getFormatEncoding(encodingByFormat, selectedCode.format)
-    : 'utf-8'
+  const viewerInterpretation = viewerCode ? getCodeInterpretation(viewerCode) : null
 
   const openUrl = () => {
     if (!selectedCode || !isValidUrl(selectedCodeText)) {
@@ -511,6 +698,13 @@ function App() {
       <header className="top-bar">
         <h1>QRe</h1>
         <div className="top-actions">
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={scanningImage}
+          >
+            {scanningImage ? 'Reading image…' : 'Scan image'}
+          </button>
           <button type="button" onClick={() => setHistoryOpen((open) => !open)}>
             {historyOpen ? 'Hide list' : 'Session list'}
           </button>
@@ -519,6 +713,17 @@ function App() {
           </button>
         </div>
       </header>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        className="visually-hidden"
+        onChange={(event) => {
+          const [file] = event.target.files || []
+          void scanFromImage(file)
+          event.target.value = ''
+        }}
+      />
 
       <section
         className="viewfinder"
@@ -599,28 +804,6 @@ function App() {
         <section className="sheet" role="dialog" aria-modal="true" aria-label="Code actions">
           <div className="sheet-card">
             <h3>{formatLabel(selectedCode.format)}</h3>
-            <label className="encoding-picker">
-              <span>Encoding</span>
-              <select
-                value={selectedCodeEncoding}
-                onChange={(event) => {
-                  const nextEncoding = event.target.value
-                  setEncodingByFormat((current) => ({
-                    ...current,
-                    [selectedCode.format]: nextEncoding,
-                  }))
-                }}
-              >
-                {ENCODING_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <small className="encoding-note">
-              Switch only if text looks garbled for this code format.
-            </small>
             <p>{selectedCodeText}</p>
             <div className="sheet-actions">
               <button type="button" onClick={() => setViewerCode(selectedCode)}>
@@ -650,8 +833,91 @@ function App() {
       {viewerCode && (
         <section className="sheet" role="dialog" aria-modal="true" aria-label="Raw code content">
           <div className="sheet-card">
-            <h3>Raw content</h3>
-            <p>{getCodeText(viewerCode)}</p>
+            <h3>Decoded view</h3>
+            <div className="viewer-controls">
+              <label className="encoding-picker">
+                <span>Encoding</span>
+                <select
+                  value={getFormatEncoding(encodingByFormat, viewerCode.format)}
+                  onChange={(event) => {
+                    const nextEncoding = event.target.value
+                    setEncodingByFormat((current) => ({
+                      ...current,
+                      [viewerCode.format]: nextEncoding,
+                    }))
+                  }}
+                >
+                  {ENCODING_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="encoding-picker">
+                <span>Interpretation</span>
+                <select
+                  value={getFormatInterpretation(interpretationByFormat, viewerCode.format)}
+                  onChange={(event) => {
+                    const nextInterpretation = event.target.value
+                    setInterpretationByFormat((current) => ({
+                      ...current,
+                      [viewerCode.format]: nextInterpretation,
+                    }))
+                  }}
+                >
+                  {INTERPRETATION_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <small className="encoding-note">
+              Decoding and interpretation are applied to this already scanned value.
+            </small>
+            <dl className="parameter-list">
+              <div>
+                <dt>Read source</dt>
+                <dd>{formatSourceLabel(viewerCode.source)}</dd>
+              </div>
+              <div>
+                <dt>Read mode</dt>
+                <dd>{viewerCode.readMode || 'normal'}</dd>
+              </div>
+              <div>
+                <dt>Reader</dt>
+                <dd>BarcodeDetector ({SUPPORTED_FORMATS.length} formats)</dd>
+              </div>
+              <div>
+                <dt>Input format</dt>
+                <dd>{formatLabel(viewerCode.format)}</dd>
+              </div>
+              {viewerCode.fileName && (
+                <div>
+                  <dt>Image file</dt>
+                  <dd>{viewerCode.fileName}</dd>
+                </div>
+              )}
+              <div>
+                <dt>Encoding</dt>
+                <dd>{viewerInterpretation?.encoding || 'utf-8'}</dd>
+              </div>
+              <div>
+                <dt>Interpretation</dt>
+                <dd>{viewerInterpretation?.interpretation || 'text'}</dd>
+              </div>
+              <div>
+                <dt>Byte source</dt>
+                <dd>{viewerInterpretation?.byteSource || 'N/A'}</dd>
+              </div>
+              <div>
+                <dt>Byte length</dt>
+                <dd>{viewerInterpretation?.byteLength ?? 0}</dd>
+              </div>
+            </dl>
+            <pre className="decoded-output">{viewerInterpretation?.value || ''}</pre>
             <button type="button" onClick={() => setViewerCode(null)}>
               Close
             </button>
