@@ -1,9 +1,15 @@
 const CACHE_NAME = 'qre-cache-v1'
-const APP_SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icons.svg', '/favicon.svg']
+const APP_SHELL = ['/', '/manifest.webmanifest', '/icons.svg', '/favicon.svg']
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()),
+    caches
+      .open(CACHE_NAME)
+      .then((cache) => cache.addAll(APP_SHELL))
+      .then(() => self.skipWaiting())
+      .catch((error) => {
+        console.warn('Service worker install caching failed:', error)
+      }),
   )
 })
 

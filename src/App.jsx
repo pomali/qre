@@ -17,6 +17,9 @@ const SUPPORTED_FORMATS = [
   'pdf417',
 ]
 const LOW_LIGHT_HINT_DELAY_MS = 10000
+const EMPTY_DETECTIONS_BEFORE_INVERSION = 3
+const INVERTED_DETECTION_COOLDOWN_MS = 1200
+const MAX_INVERTED_FRAME_DIMENSION = 960
 
 const LABELS = {
   qr_code: 'QR Code',
@@ -52,7 +55,11 @@ const decodeWithEncoding = (value, encoding) => {
   }
 
   try {
-    const bytes = Uint8Array.from(value, (char) => char.charCodeAt(0) & 0xff)
+    const codeUnits = Array.from(value, (char) => char.charCodeAt(0))
+    if (codeUnits.some((unit) => unit > 0xff)) {
+      return value
+    }
+    const bytes = Uint8Array.from(codeUnits)
     return new TextDecoder(encoding).decode(bytes)
   } catch {
     return value
@@ -95,7 +102,9 @@ function App() {
   const lowLightTimerRef = useRef(null)
   const pinchStateRef = useRef({ distance: null, zoom: 1 })
   const invertedCanvasRef = useRef(null)
+  const invertedContextRef = useRef(null)
   const emptyDetectionsRef = useRef(0)
+  const invertedCooldownUntilRef = useRef(0)
 
   const [permission, setPermission] = useState('prompt')
   const [error, setError] = useState('')
@@ -131,6 +140,8 @@ function App() {
       streamRef.current = null
     }
     trackRef.current = null
+    invertedCanvasRef.current = null
+    invertedContextRef.current = null
     if (videoRef.current) {
       videoRef.current.srcObject = null
     }
@@ -190,24 +201,30 @@ function App() {
     if (!width || !height) {
       return []
     }
+    const scale = Math.min(1, MAX_INVERTED_FRAME_DIMENSION / Math.max(width, height))
+    const targetWidth = Math.max(1, Math.round(width * scale))
+    const targetHeight = Math.max(1, Math.round(height * scale))
 
     if (!invertedCanvasRef.current) {
       invertedCanvasRef.current = document.createElement('canvas')
+      invertedContextRef.current = invertedCanvasRef.current.getContext('2d', {
+        willReadFrequently: true,
+      })
     }
 
     const canvas = invertedCanvasRef.current
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width
-      canvas.height = height
+    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+      canvas.width = targetWidth
+      canvas.height = targetHeight
     }
 
-    const context = canvas.getContext('2d', { willReadFrequently: true })
+    const context = invertedContextRef.current
     if (!context) {
       return []
     }
 
-    context.drawImage(video, 0, 0, width, height)
-    const frame = context.getImageData(0, 0, width, height)
+    context.drawImage(video, 0, 0, targetWidth, targetHeight)
+    const frame = context.getImageData(0, 0, targetWidth, targetHeight)
     const { data } = frame
     for (let index = 0; index < data.length; index += 4) {
       data[index] = 255 - data[index]
@@ -232,12 +249,21 @@ function App() {
         let detected = await detectorRef.current.detect(videoRef.current)
         if (detected.length === 0) {
           emptyDetectionsRef.current += 1
-          if (emptyDetectionsRef.current >= 3) {
+          if (
+            emptyDetectionsRef.current >= EMPTY_DETECTIONS_BEFORE_INVERSION &&
+            Date.now() >= invertedCooldownUntilRef.current
+          ) {
             detected = await detectInvertedCodes()
-            emptyDetectionsRef.current = 0
+            if (detected.length > 0) {
+              emptyDetectionsRef.current = 0
+              invertedCooldownUntilRef.current = 0
+            } else {
+              invertedCooldownUntilRef.current = Date.now() + INVERTED_DETECTION_COOLDOWN_MS
+            }
           }
         } else {
           emptyDetectionsRef.current = 0
+          invertedCooldownUntilRef.current = 0
         }
         for (const code of detected) {
           if (!code.rawValue || seenValuesRef.current.has(code.rawValue)) {
