@@ -183,6 +183,10 @@ video {
   padding: 0.45rem 0.55rem;
 }
 
+.encoding-note {
+  color: #9aa7bf;
+}
+
 .toast {
   bottom: 0.9rem;
   padding: 0.6rem 0.8rem;

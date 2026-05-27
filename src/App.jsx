@@ -95,6 +95,7 @@ function App() {
   const lowLightTimerRef = useRef(null)
   const pinchStateRef = useRef({ distance: null, zoom: 1 })
   const invertedCanvasRef = useRef(null)
+  const emptyDetectionsRef = useRef(0)
 
   const [permission, setPermission] = useState('prompt')
   const [error, setError] = useState('')
@@ -230,7 +231,13 @@ function App() {
       try {
         let detected = await detectorRef.current.detect(videoRef.current)
         if (detected.length === 0) {
-          detected = await detectInvertedCodes()
+          emptyDetectionsRef.current += 1
+          if (emptyDetectionsRef.current >= 3) {
+            detected = await detectInvertedCodes()
+            emptyDetectionsRef.current = 0
+          }
+        } else {
+          emptyDetectionsRef.current = 0
         }
         for (const code of detected) {
           if (!code.rawValue || seenValuesRef.current.has(code.rawValue)) {
@@ -585,6 +592,9 @@ function App() {
                 ))}
               </select>
             </label>
+            <small className="encoding-note">
+              Switch only if text looks garbled for this code format.
+            </small>
             <p>{selectedCodeText}</p>
             <div className="sheet-actions">
               <button type="button" onClick={() => setViewerCode(selectedCode)}>

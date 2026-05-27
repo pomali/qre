@@ -1,5 +1,5 @@
 const CACHE_NAME = 'qre-cache-v1'
-const APP_SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icons.svg']
+const APP_SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icons.svg', '/favicon.svg']
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -18,6 +18,11 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') {
+    return
+  }
+
+  if (event.request.mode === 'navigate') {
+    event.respondWith(fetch(event.request).catch(() => caches.match('/')))
     return
   }
 
