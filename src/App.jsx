@@ -17,6 +17,9 @@ const SUPPORTED_FORMATS = [
   'pdf417',
 ]
 const LOW_LIGHT_HINT_DELAY_MS = 10000
+const EMPTY_DETECTIONS_BEFORE_INVERSION = 3
+const INVERTED_DETECTION_COOLDOWN_MS = 1200
+const MAX_INVERTED_FRAME_DIMENSION = 960
 
 const LABELS = {
   qr_code: 'QR Code',
@@ -35,7 +38,33 @@ const LABELS = {
   unknown: 'Unknown',
 }
 
+const ENCODING_OPTIONS = [
+  { value: 'utf-8', label: 'UTF-8' },
+  { value: 'iso-8859-1', label: 'ISO-8859-1 (Latin-1)' },
+  { value: 'windows-1252', label: 'Windows-1252' },
+  { value: 'shift_jis', label: 'Shift_JIS' },
+  { value: 'gb18030', label: 'GB18030' },
+]
+
 const formatLabel = (format = 'unknown') => LABELS[format] || format
+const getFormatEncoding = (encodingByFormat, format) => encodingByFormat[format] || 'utf-8'
+
+const decodeWithEncoding = (value, encoding) => {
+  if (!value || encoding === 'utf-8') {
+    return value
+  }
+
+  try {
+    const codeUnits = Array.from(value, (char) => char.charCodeAt(0))
+    if (codeUnits.some((unit) => unit > 0xff)) {
+      return value
+    }
+    const bytes = Uint8Array.from(codeUnits)
+    return new TextDecoder(encoding).decode(bytes)
+  } catch {
+    return value
+  }
+}
 
 const getRelativeTime = (start, detectedAt) => {
   const delta = Math.max(0, Math.floor((detectedAt - start) / 1000))
@@ -72,6 +101,10 @@ function App() {
   const hasSuccessfulScanRef = useRef(false)
   const lowLightTimerRef = useRef(null)
   const pinchStateRef = useRef({ distance: null, zoom: 1 })
+  const invertedCanvasRef = useRef(null)
+  const invertedContextRef = useRef(null)
+  const emptyDetectionsRef = useRef(0)
+  const invertedCooldownUntilRef = useRef(0)
 
   const [permission, setPermission] = useState('prompt')
   const [error, setError] = useState('')
@@ -87,6 +120,7 @@ function App() {
   const [sessionStart, setSessionStart] = useState(() => Date.now())
   const [showTorchHint, setShowTorchHint] = useState(false)
   const [focusMessage, setFocusMessage] = useState('')
+  const [encodingByFormat, setEncodingByFormat] = useState({})
 
   const canUseScanner = typeof window !== 'undefined' && 'BarcodeDetector' in window
 
@@ -106,6 +140,8 @@ function App() {
       streamRef.current = null
     }
     trackRef.current = null
+    invertedCanvasRef.current = null
+    invertedContextRef.current = null
     if (videoRef.current) {
       videoRef.current.srcObject = null
     }
@@ -154,13 +190,81 @@ function App() {
     [zoomRange.max, zoomRange.min],
   )
 
+  const detectInvertedCodes = useCallback(async () => {
+    const video = videoRef.current
+    if (!video || !detectorRef.current) {
+      return []
+    }
+
+    const width = video.videoWidth
+    const height = video.videoHeight
+    if (!width || !height) {
+      return []
+    }
+    const scale = Math.min(1, MAX_INVERTED_FRAME_DIMENSION / Math.max(width, height))
+    const targetWidth = Math.max(1, Math.round(width * scale))
+    const targetHeight = Math.max(1, Math.round(height * scale))
+
+    if (!invertedCanvasRef.current) {
+      invertedCanvasRef.current = document.createElement('canvas')
+      invertedContextRef.current = invertedCanvasRef.current.getContext('2d', {
+        willReadFrequently: true,
+      })
+    }
+
+    const canvas = invertedCanvasRef.current
+    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+      canvas.width = targetWidth
+      canvas.height = targetHeight
+    }
+
+    const context = invertedContextRef.current
+    if (!context) {
+      return []
+    }
+
+    context.drawImage(video, 0, 0, targetWidth, targetHeight)
+    const frame = context.getImageData(0, 0, targetWidth, targetHeight)
+    const { data } = frame
+    for (let index = 0; index < data.length; index += 4) {
+      data[index] = 255 - data[index]
+      data[index + 1] = 255 - data[index + 1]
+      data[index + 2] = 255 - data[index + 2]
+    }
+    context.putImageData(frame, 0, 0)
+
+    try {
+      return await detectorRef.current.detect(canvas)
+    } catch {
+      return []
+    }
+  }, [])
+
   useEffect(() => {
     detectCodesRef.current = async () => {
       if (!videoRef.current || !detectorRef.current || scanningRef.current) return
 
       scanningRef.current = true
       try {
-        const detected = await detectorRef.current.detect(videoRef.current)
+        let detected = await detectorRef.current.detect(videoRef.current)
+        if (detected.length === 0) {
+          emptyDetectionsRef.current += 1
+          if (
+            emptyDetectionsRef.current >= EMPTY_DETECTIONS_BEFORE_INVERSION &&
+            Date.now() >= invertedCooldownUntilRef.current
+          ) {
+            detected = await detectInvertedCodes()
+            if (detected.length > 0) {
+              emptyDetectionsRef.current = 0
+              invertedCooldownUntilRef.current = 0
+            } else {
+              invertedCooldownUntilRef.current = Date.now() + INVERTED_DETECTION_COOLDOWN_MS
+            }
+          }
+        } else {
+          emptyDetectionsRef.current = 0
+          invertedCooldownUntilRef.current = 0
+        }
         for (const code of detected) {
           if (!code.rawValue || seenValuesRef.current.has(code.rawValue)) {
             continue
@@ -189,7 +293,7 @@ function App() {
         })
       }
     }
-  }, [triggerFeedback])
+  }, [detectInvertedCodes, triggerFeedback])
 
   const startScanner = useCallback(async () => {
     if (!canUseScanner) {
@@ -360,11 +464,21 @@ function App() {
     setShowTorchHint(false)
   }
 
+  const getCodeText = useCallback(
+    (code) => decodeWithEncoding(code.value, getFormatEncoding(encodingByFormat, code.format)),
+    [encodingByFormat],
+  )
+
+  const selectedCodeText = selectedCode ? getCodeText(selectedCode) : ''
+  const selectedCodeEncoding = selectedCode
+    ? getFormatEncoding(encodingByFormat, selectedCode.format)
+    : 'utf-8'
+
   const openUrl = () => {
-    if (!selectedCode || !isValidUrl(selectedCode.value)) {
+    if (!selectedCode || !isValidUrl(selectedCodeText)) {
       return
     }
-    window.open(selectedCode.value, '_blank', 'noopener,noreferrer')
+    window.open(selectedCodeText, '_blank', 'noopener,noreferrer')
   }
 
   const shareCode = async () => {
@@ -372,9 +486,9 @@ function App() {
 
     try {
       if (navigator.share) {
-        await navigator.share({ text: selectedCode.value })
+        await navigator.share({ text: selectedCodeText })
       } else {
-        await navigator.clipboard.writeText(selectedCode.value)
+        await navigator.clipboard.writeText(selectedCodeText)
         showToast('Copied to clipboard for sharing.')
       }
     } catch {
@@ -385,7 +499,7 @@ function App() {
   const copyCode = async () => {
     if (!selectedCode) return
     try {
-      await navigator.clipboard.writeText(selectedCode.value)
+      await navigator.clipboard.writeText(selectedCodeText)
       showToast('Copied')
     } catch {
       showToast('Copy failed')
@@ -485,7 +599,29 @@ function App() {
         <section className="sheet" role="dialog" aria-modal="true" aria-label="Code actions">
           <div className="sheet-card">
             <h3>{formatLabel(selectedCode.format)}</h3>
-            <p>{selectedCode.value}</p>
+            <label className="encoding-picker">
+              <span>Encoding</span>
+              <select
+                value={selectedCodeEncoding}
+                onChange={(event) => {
+                  const nextEncoding = event.target.value
+                  setEncodingByFormat((current) => ({
+                    ...current,
+                    [selectedCode.format]: nextEncoding,
+                  }))
+                }}
+              >
+                {ENCODING_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <small className="encoding-note">
+              Switch only if text looks garbled for this code format.
+            </small>
+            <p>{selectedCodeText}</p>
             <div className="sheet-actions">
               <button type="button" onClick={() => setViewerCode(selectedCode)}>
                 View
@@ -493,7 +629,7 @@ function App() {
               <button
                 type="button"
                 onClick={openUrl}
-                disabled={!isValidUrl(selectedCode.value)}
+                disabled={!isValidUrl(selectedCodeText)}
               >
                 Open URL
               </button>
@@ -515,7 +651,7 @@ function App() {
         <section className="sheet" role="dialog" aria-modal="true" aria-label="Raw code content">
           <div className="sheet-card">
             <h3>Raw content</h3>
-            <p>{viewerCode.value}</p>
+            <p>{getCodeText(viewerCode)}</p>
             <button type="button" onClick={() => setViewerCode(null)}>
               Close
             </button>

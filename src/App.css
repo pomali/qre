@@ -108,7 +108,7 @@ video {
 }
 
 .history.open {
-  max-height: 38vh;
+  max-height: 68vh;
 }
 
 .history-header {
@@ -123,7 +123,7 @@ video {
   margin: 0;
   padding: 0 0.6rem 0.8rem;
   overflow: auto;
-  max-height: calc(38vh - 3rem);
+  max-height: calc(68vh - 3rem);
 }
 
 .history li {
@@ -167,6 +167,24 @@ video {
   width: min(100%, 640px);
   padding: 1rem;
   box-sizing: border-box;
+}
+
+.encoding-picker {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.5rem 0 0.7rem;
+}
+
+.encoding-picker select {
+  border: 1px solid #38435e;
+  border-radius: 0.5rem;
+  background: #0f1118;
+  color: #fff;
+  padding: 0.45rem 0.55rem;
+}
+
+.encoding-note {
+  color: #9aa7bf;
 }
 
 .toast {
